@@ -1,31 +1,27 @@
 package main
 
-
-
 import (
-//"fmt"
-"log"
-"strconv"
-//"time"
-//"math/rand"
-//"os"
+	// "fmt"
+	"log"
+	"strconv"
 
-"net/http"
-_ "net/http/pprof"
+	//"time"
+	//"math/rand"
+	//"os"
 
+	"net/http"
+	_ "net/http/pprof"
 
-"./src/fetcher"
-"./src/protocol"
-"./src/config"
-"./src/ds"
-"./src/monitor"
-"./src/process"
-"./src/security"
-"./src/seed"
-"./src/logger"
+	"github.com/cnn-rnn/dse/src/config"
+	"github.com/cnn-rnn/dse/src/ds"
+	"github.com/cnn-rnn/dse/src/fetcher"
+	"github.com/cnn-rnn/dse/src/logger"
+	moni "github.com/cnn-rnn/dse/src/monitor"
+	proc "github.com/cnn-rnn/dse/src/process"
+	"github.com/cnn-rnn/dse/src/protocol"
+	"github.com/cnn-rnn/dse/src/security"
+	"github.com/cnn-rnn/dse/src/seed"
 )
-
-
 
 var nJobs = 2000
 var nResults = 10000
@@ -35,129 +31,91 @@ var ttosleep = 0.0
 
 var tstart int64
 
-
-
-
-var dstore * ds.Ds
-var mon * moni.Mon
-var cnf * config.Conf
-var sec * security.Sec
-var pro * proc.Proc
-
+var dstore *ds.Ds
+var mon *moni.Mon
+var cnf *config.Conf
+var sec *security.Sec
+var pro *proc.Proc
 
 var S = make(map[int]int)
 
-
-type Resp struct{
-  name string
-  links map[string]bool
-  txt string
-  siz int
-  t int64
-  err string
+type Resp struct {
+	name  string
+	links map[string]bool
+	txt   string
+	siz   int
+	t     int64
+	err   string
 }
-
-
 
 func worker(id int, jobs <-chan string, results chan<- Resp) {
-  for j := range jobs {
-  
-    links,txt,siz,t, err := fetcher.OnePageLinks(j)
-    if( err == ""){
-       results <- Resp{j,links,txt,siz,t,err}
-        
-    }
-  }
+	for j := range jobs {
+
+		links, txt, siz, t, err := fetcher.OnePageLinks(j)
+		if err == "" {
+			results <- Resp{j, links, txt, siz, t, err}
+
+		}
+	}
 }
 
-
-
-func Process_links(name string, links map[string]bool){
-for i:= range links{
-  dstore.Store(i)
-}
-//msg := protocol.Serialize(name,links)
-//go mon.SendString(sec,  msg)
-siz := strconv.Itoa(len(links)) + protocol.SEP + name + protocol.SEP
-go mon.SendString(sec,  siz)
+func Process_links(name string, links map[string]bool) {
+	for i := range links {
+		dstore.Store(i)
+	}
+	// msg := protocol.Serialize(name,links)
+	// go mon.SendString(sec,  msg)
+	siz := strconv.Itoa(len(links)) + protocol.SEP + name + protocol.SEP
+	go mon.SendString(sec, siz)
 }
 
+func main() {
 
+	logger.Log("dsed started")
 
+	cnf = config.Configure()
+	dstore = ds.Create(cnf.Dir0())
+	sec = security.Create(cnf.Dir0())
+	pro = proc.Create(cnf.Dir0(), cnf.Cpu(), cnf.Bw(), cnf.Disk(), &ttosleep)
+	pro.Start()
 
+	mon = moni.Create(cnf.MonAddr())
+	go mon.Maintain(sec.GetPubKAsString())
+	go mon.Listen(cnf.Dir0())
 
-func main(){
+	jobs := make(chan string, nJobs)
+	results := make(chan Resp, nResults)
 
-  
-  logger.Log("dsed started")  
+	seed.Seed(jobs, cnf.Dir0())
 
-  cnf = config.Configure()  
-  dstore = ds.Create(cnf.Dir0() )
-  sec = security.Create(cnf.Dir0())  
-  pro = proc.Create(cnf.Dir0(), cnf.Cpu() , cnf.Bw(), cnf.Disk(),&ttosleep)
-  pro.Start()
+	for w := 1; w <= nWorkers; w++ {
+		go worker(w, jobs, results)
+	}
 
+	go func() {
+		log.Println(http.ListenAndServe("localhost:6060", nil))
+	}()
 
-  mon = moni.Create(cnf.MonAddr())
-  go mon.Maintain(sec.GetPubKAsString())
-  go mon.Listen(cnf.Dir0())
+	for {
 
+		R := <-results
+		name := R.name
+		lin := R.links
+		//    erro := R.err
+		pro.AddToBw(R.t, R.siz)
 
+		Process_links(name, lin)
 
+		//    fmt.Println("results= ",len(results),"jobs=",len(jobs),"\n")
 
+		count := 0
+		for len(jobs) < nJobs && count < 100 {
+			count += 1
+			u := dstore.Rand()
+			if len(u) > 0 {
+				jobs <- u
+			}
+		}
 
-  jobs := make(chan string, nJobs)
-  results := make(chan Resp, nResults)
-
-  seed.Seed(jobs, cnf.Dir0())
-
-  for w := 1; w <= nWorkers; w++ {
-    go worker(w, jobs, results)
-  }
-
-
-go func() {
-	log.Println(http.ListenAndServe("localhost:6060", nil))
-}()
-
-  
-
-  for {
-
-
-    R := <-results
-    name := R.name
-    lin := R.links
-//    erro := R.err
-    pro.AddToBw(R.t , R.siz)
-    
-    
-    Process_links( name,lin)    
-
-//    fmt.Println("results= ",len(results),"jobs=",len(jobs),"\n")
-
-
-    count := 0
-    for len(jobs) < nJobs && count <100{
-      count+=1
-      u := dstore.Rand()
-      if(len(u)>0){
-        jobs <- u
-      }
-    }
-
-    
-    
-  }  
-}  
-
-  
-  
-  
-
-  
-  
-
-
-
-
+	}
+}
